@@ -1,0 +1,69 @@
+services:
+  db:
+    image: ${BASE_REGISTRY:-docker.m.daocloud.io/library}/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-personal_blog}
+      POSTGRES_USER: ${DB_USER:-blog}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-blog} -d ${DB_NAME:-personal_blog}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [internal]
+
+  api:
+    build:
+      context: ./backend
+      args:
+        BASE_REGISTRY: ${BASE_REGISTRY:-docker.m.daocloud.io/library}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DJANGO_MEDIA_ROOT: /app/media
+    volumes:
+      - ./data/media:/app/media
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+      python manage.py collectstatic --noinput &&
+      python manage.py seed_demo &&
+      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+
+  web:
+    build:
+      context: .
+      args:
+        BASE_REGISTRY: ${BASE_REGISTRY:-docker.m.daocloud.io/library}
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes:
+      - ./data/letsencrypt:/etc/letsencrypt:ro
+      - ./data/certbot-webroot:/var/www/certbot:ro
+    command: ["/bin/sh", "-c", "while sleep 6h; do nginx -s reload; done & exec nginx -g 'daemon off;'"]
+    depends_on: [api]
+    networks: [internal]
+
+  certbot-renew:
+    image: docker.m.daocloud.io/certbot/certbot:v5.4.0
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c", "while true; do certbot renew --quiet; sleep 12h; done"]
+    volumes:
+      - ./data/letsencrypt:/etc/letsencrypt
+      - ./data/certbot-webroot:/var/www/certbot
+    depends_on: [web]
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
